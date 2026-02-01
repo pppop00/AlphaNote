@@ -79,3 +79,10 @@ gold will go up because geo politics
 
 good for now
 
+
+---
+
+## VST | Bullish | 2026-01-31 21:30 | Oliver
+
+Good energy company during such big storm winter time
+
