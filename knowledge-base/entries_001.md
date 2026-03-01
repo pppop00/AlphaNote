@@ -86,3 +86,13 @@ good for now
 
 Good energy company during such big storm winter time
 
+
+---
+
+
+---
+
+## BRAZIL INTEREST | Bearish | 2026-02-28 19:51 | Oliver/Tim
+
+cut more than 3% on next decision
+

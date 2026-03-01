@@ -369,7 +369,6 @@ def create_app():
                     gr.HTML("<div class='sidebar-header'>Chat with your Notes</div>")
                     
                     chatbot = gr.Chatbot(
-                        type="messages",
                         height=480,
                         show_label=False,
                         avatar_images=(None, "https://api.dicebear.com/7.x/bottts/svg?seed=alpha&backgroundColor=2C3E50")
@@ -422,4 +421,4 @@ def create_app():
 if __name__ == "__main__":
     ensure_directories()
     app = create_app()
-    app.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
+    app.launch(server_name="0.0.0.0", server_port=7860)
