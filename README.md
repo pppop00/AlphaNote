@@ -21,6 +21,7 @@ pip install -r requirements.txt
 # 2. Install & start Ollama (required for chat)
 # Download from: https://ollama.ai
 ollama pull llama3.2
+ollama pull nomic-embed-text
 ollama serve
 
 # 3. Run AlphaNote
@@ -28,6 +29,19 @@ python app.py
 ```
 
 Open **http://127.0.0.1:7860**
+
+If port `7860` is occupied, either:
+
+```bash
+ALPHANOTE_PORT=7861 python app.py
+```
+
+or stop old process first:
+
+```bash
+lsof -nP -iTCP:7860 -sTCP:LISTEN
+kill <PID>
+```
 
 ## File Structure
 
@@ -63,7 +77,24 @@ Edit `app.py` constants:
 | `USE_LOCAL_LLM` | True | Use Ollama (True) or OpenAI (False) |
 | `LOCAL_MODEL` | llama3.2 | Ollama model name |
 | `OPENAI_MODEL` | gpt-4o-mini | OpenAI model (if USE_LOCAL_LLM=False) |
-| `EMBEDDING_MODEL` | all-MiniLM-L6-v2 | Sentence transformer model |
+| `EMBEDDING_MODEL` | nomic-embed-text | Ollama embedding model |
+
+## Startup Issue: Root Cause and Fix
+
+### Root Cause
+
+1. **Port conflict**: older AlphaNote processes were still listening on `7860`, so Gradio failed with:
+   `Cannot find empty port in range...`.
+2. **Environment drift with latest dependency versions**: eager imports in the original startup path (`langchain_huggingface`, `langchain_openai`, and heavy splitters/loaders) could block startup in this local Python/venv setup.
+
+### Fix Implemented
+
+1. **Made launch port configurable** via `ALPHANOTE_PORT`; if not set, app uses Gradio default behavior.
+2. **Reduced startup-time heavy imports**:
+   - switched embeddings to `OllamaEmbeddings` (`nomic-embed-text`)
+   - replaced LangChain `ChatOpenAI` call path with direct Ollama HTTP call
+   - replaced heavy text-splitter/doc-loader path with lightweight local chunking
+3. **Deferred vector DB initialization** until first request, so UI can start quickly and reliably.
 
 ## Performance Optimizations
 

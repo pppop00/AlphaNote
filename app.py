@@ -5,19 +5,15 @@ Optimized with Incremental RAG Updates
 
 import os
 import glob
+import requests
 from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
 from dotenv import load_dotenv
 
-from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.documents import Document
+from langchain_community.embeddings import OllamaEmbeddings
 
 load_dotenv()
 
@@ -28,7 +24,7 @@ KNOWLEDGE_BASE_DIR = "knowledge-base"
 VECTOR_DB_DIR = "vector_db"
 MAX_FILE_SIZE_KB = 500
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "nomic-embed-text"
 USE_LOCAL_LLM = True
 LOCAL_MODEL = "llama3.2"
 OPENAI_MODEL = "gpt-4o-mini"
@@ -131,41 +127,45 @@ class ThesisRAG:
         
         # Load embedding model once at startup
         print("[RAG] Loading embedding model...")
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={'device': 'cpu'}
+        self.embeddings = OllamaEmbeddings(
+            model=EMBEDDING_MODEL,
+            base_url="http://localhost:11434"
         )
         print("[RAG] Embedding model loaded")
         
-        # Try to load existing vector database from disk
-        if os.path.exists(VECTOR_DB_DIR) and os.listdir(VECTOR_DB_DIR):
-            try:
-                print("[RAG] Loading existing vector database...")
-                self.vectorstore = Chroma(
-                    persist_directory=VECTOR_DB_DIR,
-                    embedding_function=self.embeddings
-                )
-                self._init_llm()
-                self.is_ready = True
-                print("[RAG] Loaded existing database successfully")
-            except Exception as e:
-                print(f"[RAG] Could not load existing database: {e}")
+        # Defer vector database loading/rebuild until first use to keep startup fast.
+        print("[RAG] Vector database initialization deferred until first request")
 
     def _init_llm(self):
         """Initialize the LLM."""
         if USE_LOCAL_LLM:
-            self.llm = ChatOpenAI(
-                model_name=LOCAL_MODEL,
-                base_url='http://localhost:11434/v1',
-                api_key='ollama',
-                temperature=0.3
-            )
+            self.llm = {
+                "provider": "ollama",
+                "model": LOCAL_MODEL,
+                "url": "http://localhost:11434/api/chat"
+            }
         else:
-            self.llm = ChatOpenAI(
-                model_name=OPENAI_MODEL,
-                temperature=0.3
-            )
-        print(f"[RAG] LLM initialized: {LOCAL_MODEL if USE_LOCAL_LLM else OPENAI_MODEL}")
+            self.llm = None
+        print(f"[RAG] LLM initialized: {LOCAL_MODEL if USE_LOCAL_LLM else 'disabled'}")
+
+    def _split_text(self, text: str, chunk_size: int = 500, overlap: int = 100):
+        """Simple local splitter to avoid heavy optional dependencies."""
+        clean_text = text.strip()
+        if not clean_text:
+            return []
+
+        chunks = []
+        start = 0
+        text_len = len(clean_text)
+
+        while start < text_len:
+            end = min(text_len, start + chunk_size)
+            chunks.append(clean_text[start:end])
+            if end >= text_len:
+                break
+            start = max(end - overlap, start + 1)
+
+        return chunks
 
     def _full_rebuild(self):
         """Full rebuild of vector database (only when needed)."""
@@ -176,26 +176,25 @@ class ThesisRAG:
         
         try:
             print("[RAG] Starting full rebuild...")
-            
-            # Load all documents
-            docs = []
-            for f in md_files:
-                docs.extend(TextLoader(f, encoding='utf-8').load())
-            print(f"[RAG] Loaded {len(docs)} documents")
-            
-            # Split documents
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=100,
-                separators=["\n---\n", "\n## ", "\n\n", "\n"]
-            )
-            splits = splitter.split_documents(docs)
-            print(f"[RAG] Split into {len(splits)} chunks")
-            
-            # Create vector store
-            self.vectorstore = Chroma.from_documents(
-                documents=splits,
+
+            texts = []
+            metadatas = []
+            for file_path in md_files:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                chunks = self._split_text(content)
+                texts.extend(chunks)
+                metadatas.extend([{"source": file_path}] * len(chunks))
+
+            print(f"[RAG] Split into {len(texts)} chunks")
+            if not texts:
+                print("[RAG] No content found for rebuild")
+                return False
+
+            self.vectorstore = Chroma.from_texts(
+                texts=texts,
                 embedding=self.embeddings,
+                metadatas=metadatas,
                 persist_directory=VECTOR_DB_DIR
             )
             
@@ -219,11 +218,10 @@ class ThesisRAG:
         
         try:
             print("[RAG] Adding incremental entry...")
-            doc = Document(
-                page_content=entry_text,
-                metadata={"source": "incremental", "timestamp": datetime.now().isoformat()}
+            self.vectorstore.add_texts(
+                [entry_text],
+                metadatas=[{"source": "incremental", "timestamp": datetime.now().isoformat()}]
             )
-            self.vectorstore.add_documents([doc])
             print("[RAG] Incremental entry added successfully")
             return True
         except Exception as e:
@@ -289,16 +287,34 @@ Question: {message}
 Provide a clear answer based on the entries above."""
 
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt)
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ]
             
             # Call LLM
             print("[RAG] Calling LLM...")
-            response = self.llm.invoke(messages)
-            print(f"[RAG] Response received ({len(response.content)} chars)")
+            if not USE_LOCAL_LLM or not self.llm:
+                raise RuntimeError("Only local Ollama chat is supported in this environment.")
+
+            response = requests.post(
+                self.llm["url"],
+                json={
+                    "model": self.llm["model"],
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"temperature": 0.3}
+                },
+                timeout=120
+            )
+            response.raise_for_status()
+            response_json = response.json()
+            response_text = (response_json.get("message") or {}).get("content", "").strip()
+            print(f"[RAG] Response received ({len(response_text)} chars)")
             
-            new_history.append({"role": "assistant", "content": response.content})
+            if not response_text:
+                response_text = "⚠️ Empty response from Ollama."
+
+            new_history.append({"role": "assistant", "content": response_text})
             return "", new_history
             
         except Exception as e:
@@ -421,4 +437,7 @@ def create_app():
 if __name__ == "__main__":
     ensure_directories()
     app = create_app()
-    app.launch(server_name="0.0.0.0", server_port=7860)
+    launch_kwargs = {"server_name": "0.0.0.0"}
+    if os.getenv("ALPHANOTE_PORT"):
+        launch_kwargs["server_port"] = int(os.getenv("ALPHANOTE_PORT"))
+    app.launch(**launch_kwargs)
