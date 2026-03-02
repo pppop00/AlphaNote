@@ -96,3 +96,10 @@ Good energy company during such big storm winter time
 
 cut more than 3% on next decision
 
+
+---
+
+## GOLD | Bullish | 2026-03-01 11:38 | Oliver
+
+Geo tension increased between America and middle east
+
